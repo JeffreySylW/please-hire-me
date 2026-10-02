@@ -452,6 +452,12 @@ instead of crawling search pages.
   start window (internship terms and seasons in titles), sponsorship, `minYearsExp` and the comp floor; the
   prestige gate is yours, per posting. Every row links to the company's own ATS. It also appends ATS slugs it
   has not seen to `data/slug-candidates.txt`, so `delta_sweep.py` reads those boards in full from the next run.
+- **`python3 scripts/linkedin_sweep.py`, once per run, foreground.** New Entry level / Associate postings from
+  LinkedIn's public guest search for each `targets.locations` entry it knows (`LOCATIONS` in the script), with the
+  years-of-experience and active-clearance gates already applied (`--selftest` checks the parser). LinkedIn is a
+  SOURCE, never a channel: never sign in, never use Easy Apply. A `company-site` row means the posting applies on the
+  employer's own site: find the same req there (ATS board API or careers portal) and apply on it. `easy-apply` rows
+  and staffing agencies are out of scope. LinkedIn rate-limits bursts (HTTP 429); the script backs off on its own.
 - Hacker News monthly hiring thread: `./scripts/fetch_hn_hiring.sh`. Startups that never post to a
   job board, roles link straight to the company ATS. Refill an empty queue from here first.
 
