@@ -10,8 +10,8 @@ posting applies on the company's own site ("company-site") or only through Easy 
 of scope). For a company-site row, find the same req on the company's ATS and apply there.
 
 Searches each targets.locations entry that has a LinkedIn location string (LOCATIONS below) for a few
-targets.roles keywords at LinkedIn's Entry level and Associate filters, then reads each posting and drops it
-when the body requires more years than targets.max_years_experience_required or an ACTIVE clearance.
+targets.roles keywords at LinkedIn's Entry level and Associate filters, then reads each posting and drops it only for a
+non-software title or a clearance. Location, remote/on-site/hybrid and experience level are never filtered.
 Prestige, staffing-agency and fit judgment stay with the agent. Run in the FOREGROUND.
 Output: state/sweep/linkedin_cands.json and tab-separated rows on stdout.
 """
@@ -29,9 +29,19 @@ LOCATIONS = {  # targets.locations entry -> LinkedIn location string. Entries wi
     'San Francisco Bay Area': 'San Francisco Bay Area',
     'Chicago': 'Chicago, Illinois, United States',
 }
-KEYWORDS = ['software engineer', 'software developer', 'full stack developer']
-BAD_TITLE = re.compile(r'senior|\bsr\b|staff|principal|\blead\b|manager|director|architect|vice president|\bVP\b|\bII\b|\bIII\b|\bIV\b|\b[2-5]\b|intern|co-?op', re.I)
+# One boolean query, no LinkedIn experience-level filter (f_E): LinkedIn tags most real entry roles at federal
+# contractors and regional employers "Not Applicable", so f_E=2,3 silently hid 42 of 56 fits in a 3-day test.
+# Level is judged from the posting text instead (req_years). Override with targets.linkedin_query.
+QUERY = ('("new grad" OR "entry level" OR "entry-level" OR "new graduate" OR associate OR junior) '
+         '("software engineer" OR "software developer" OR "full stack developer" OR "backend developer" OR '
+         '"frontend developer" OR "application developer" OR "IT developer" OR "AI engineer" OR '
+         '"machine learning engineer" OR "ML engineer" OR "data engineer" OR "systems engineer" OR "QA engineer" OR '
+         '"test engineer" OR "web developer" OR programmer)')
+# The keyword query matches the whole posting body, so non-software roles (field service, plant operations, clinical)
+# come back too. A title must name software work to survive.
+SOFT_TITLE = re.compile(r'software|developer|programmer|full.?stack|front.?end|back.?end|\bweb\b|application|\bapps?\b|data (?:engineer|scientist)|machine learning|\bml\b|\bai\b|robotics|\bqa\b|sdet|\btest(?:ing)? engineer|systems engineer|devops|cloud engineer|automation engineer|\bit developer', re.I)
 YEARS = re.compile(r'(?<!\d)(\d{1,2})(?!\d)\s*\+?\s*(?:-|to|–)?\s*\d{0,2}\s*\+?\s*years?\b(?!\s*(?:of age|old))[^.]{0,60}?experience', re.I)
+ANY_CLEARANCE = re.compile(r'security clearance|TS/SCI|top secret|secret clearance|clearance (?:is )?required|(?:obtain|eligible for)[^.;]{0,30}clearance|polygraph', re.I)
 ACTIVE_CLEARANCE = re.compile(r'(active|current|must (?:hold|have|possess))[^;:]{0,40}?(clearance|TS/SCI|\bTS\b|top secret|secret)', re.I)
 UA = {'User-Agent': 'Mozilla/5.0'}
 
@@ -48,6 +58,12 @@ def req_years(t):
 
 def needs_active_clearance(t):
     return bool(ACTIVE_CLEARANCE.search(t))
+
+def mentions_clearance(t):
+    """Any clearance requirement, active OR to-be-obtained. Used when targets.skip_any_clearance is true.
+    Boilerplate that says no clearance is needed does not count."""
+    t = re.sub(r'(?:security )?clearance (?:type|status|level)?:?\s*(?:none|not required)[^.]*', '', t, flags=re.I)
+    return bool(ANY_CLEARANCE.search(t))
 
 def get(url):
     for wait in (10, 30, 60, None):  # LinkedIn answers bursts with HTTP 429; back off and retry
@@ -69,6 +85,14 @@ def selftest():
     assert needs_active_clearance('Active TS/SCI security clearance.')
     assert not needs_active_clearance('Ability to obtain a Secret clearance')
     assert not needs_active_clearance('obtain and maintain a security clearance at the TS/SCI level')
+    assert mentions_clearance('Ability to obtain a Secret clearance')
+    assert mentions_clearance('must be able to obtain and maintain a security clearance')
+    assert not mentions_clearance('Security Clearance Type: None/Not Required Security Clearance Status: Not Required')
+    assert not mentions_clearance('Experience with secret management in Vault and AWS')
+    for title in ('Software Engineer, Entry Level', 'Engineer - AI Delivery (high-potential program)', 'Full Stack Developer', 'Junior Web Developer', 'QA Engineer'):
+        assert SOFT_TITLE.search(title), title
+    for title in ('Operations Engineer', 'Early Career Field Service Engineer, Power & Water Solutions', 'Tele-Infectious Disease', 'Licensing Engineer (early career)', 'Mechanical Design Engineer'):
+        assert not SOFT_TITLE.search(title), title
     print('selftest ok')
 
 def main():
@@ -76,43 +100,52 @@ def main():
     if '--selftest' in args: return selftest()
     S = json.load(open(os.path.join(R, 'config', 'settings.json')))
     T = S['targets']
-    max_years = T.get('max_years_experience_required', 1)
     skip = [c.lower() for c in T.get('skip_companies', [])]
+    skip_any_clearance = T.get('skip_any_clearance', False)
+    query = T.get('linkedin_query') or QUERY
     now = datetime.datetime.now(UTC)
     if '--hours' in args:
         since, advance = now - datetime.timedelta(hours=float(args[args.index('--hours') + 1])), False
     elif os.path.exists(CUT_FILE):
         since, advance = datetime.datetime.fromisoformat(open(CUT_FILE).read().strip().replace('Z', '+00:00')), True
     else:
-        since, advance = now - datetime.timedelta(hours=36), True
+        since, advance = now - datetime.timedelta(hours=24), True
     window = max(3600, int((now - since).total_seconds()))
     locs = [(l, LOCATIONS[l]) for l in T.get('locations', []) if l in LOCATIONS]
     print(f'window {window // 3600}h  locations {[l for l, _ in locs]}')
 
     cards = {}
     for label, loc in locs:
-        for kw in KEYWORDS:
-            for start in (0, 25):
-                q = urllib.parse.urlencode({'keywords': kw, 'location': loc, 'f_TPR': f'r{window}', 'f_E': '2,3', 'start': start})
-                try: page = get('https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?' + q)
-                except Exception as e: print('search error', label, kw, e); continue
-                for card in page.split('<li>')[1:]:
-                    g = lambda p: html.unescape(re.sub(r'\s+', ' ', (re.search(p, card, re.S) or [None, ''])[1])).strip()
-                    jid = g(r'jobPosting:(\d+)')
-                    if jid and jid not in cards:
-                        cards[jid] = dict(id=jid, title=g(r'base-search-card__title">(.*?)<'), company=g(r'base-search-card__subtitle">.*?>(.*?)<'),
-                                          location=g(r'job-search-card__location">(.*?)<'), posted=g(r'datetime="(.*?)"'), area=label)
-                time.sleep(1.5)
+        for start in range(0, 250, 25):  # newest first; stops at the last page
+            q = urllib.parse.urlencode({'keywords': query, 'location': loc, 'f_TPR': f'r{window}', 'sortBy': 'DD', 'start': start})
+            try: page = get('https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?' + q)
+            except Exception as e: print('search error', label, start, e); break
+            got = 0
+            for card in page.split('<li>')[1:]:
+                g = lambda p: html.unescape(re.sub(r'\s+', ' ', (re.search(p, card, re.S) or [None, ''])[1])).strip()
+                jid = g(r'jobPosting:(\d+)')
+                if not jid: continue
+                got += 1
+                if jid not in cards:
+                    cards[jid] = dict(id=jid, title=g(r'base-search-card__title">(.*?)<'), company=g(r'base-search-card__subtitle">.*?>(.*?)<'),
+                                      location=g(r'job-search-card__location">(.*?)<'), posted=g(r'datetime="(.*?)"'),
+                                      ago=g(r'<time[^>]*>(.*?)</time>'), area=label)
+            time.sleep(2)
+            if got < 10: break
 
     rows = []
     for c in cards.values():
-        if BAD_TITLE.search(c['title']) or any(s in c['company'].lower() for s in skip): continue
+        # Location, workplace type (remote/on-site/hybrid) and experience level are deliberately NOT filtered here:
+        # the boolean query and the search location are the whole filter, the way a person searches by hand.
+        # years is reported for the agent to read, never used to drop a row.
+        if not SOFT_TITLE.search(c['title']) or any(s in c['company'].lower() for s in skip): continue
         try: page = get(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{c['id']}")
         except Exception as e: print('detail error', c['id'], e); continue
         t = text_of(page)
         time.sleep(3)
         yrs = req_years(t)
-        if (yrs is not None and yrs > max_years) or needs_active_clearance(t): continue
+        if needs_active_clearance(t): continue
+        if skip_any_clearance and mentions_clearance(t): continue
         pay = re.search(r'\$\s?[\d,]{5,}(?:\.\d+)?\s*(?:-|to|–)\s*\$?\s?[\d,]{5,}', t)
         c.update(years='?' if yrs is None else yrs, pay=pay.group(0) if pay else '',
                  apply='company-site' if 'offsite-apply' in page else 'easy-apply',
@@ -122,9 +155,9 @@ def main():
     rows.sort(key=lambda c: (c['apply'] != 'company-site', c['area'], c['posted']), reverse=False)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     json.dump(rows, open(OUT, 'w'), indent=1)
-    print(f'{len(cards)} cards, {len(rows)} after title/years/clearance filters')
+    print(f'{len(cards)} cards, {len(rows)} after software-title and clearance filters')
     for c in rows:
-        print('\t'.join(str(c[k]) for k in ('area', 'posted', 'company', 'title', 'location', 'years', 'pay', 'apply', 'url')))
+        print('\t'.join(str(c[k]) for k in ('area', 'ago', 'company', 'title', 'location', 'years', 'pay', 'apply', 'url')))
     if advance:
         open(CUT_FILE, 'w').write(now.isoformat(timespec='minutes').replace('+00:00', 'Z') + '\n')
 
