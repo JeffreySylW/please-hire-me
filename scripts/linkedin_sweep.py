@@ -39,7 +39,9 @@ QUERY = ('("new grad" OR "entry level" OR "entry-level" OR "new graduate" OR ass
          '"test engineer" OR "web developer" OR programmer)')
 # The keyword query matches the whole posting body, so non-software roles (field service, plant operations, clinical)
 # come back too. A title must name software work to survive.
-SOFT_TITLE = re.compile(r'software|developer|programmer|full.?stack|front.?end|back.?end|\bweb\b|application|\bapps?\b|data (?:engineer|scientist)|machine learning|\bml\b|\bai\b|robotics|\bqa\b|sdet|\btest(?:ing)? engineer|systems engineer|devops|cloud engineer|automation engineer|\bit developer', re.I)
+SOFT_TITLE = re.compile(r'software|developer|programmer|full.?stack|front.?end|back.?end|\bweb\b|application|\bapps?\b|data (?:engineer|scientist)|machine learning|\bml\b|\bai\b|robotics|\bqa\b|sdet|\btest(?:ing)? engineer|systems engineer|devops|automation engineer|\bit developer|systems analyst|technical solutions|applications? analyst|implementation (?:engineer|analyst)', re.I)
+# Titles the user has ruled out (targets.skip_title_terms in settings adds more): cloud-centric roles by default.
+SKIP_TITLE = re.compile(r'cloud|\baws\b|azure|\bgcp\b', re.I)
 YEARS = re.compile(r'(?<!\d)(\d{1,2})(?!\d)\s*\+?\s*(?:-|to|–)?\s*\d{0,2}\s*\+?\s*years?\b(?!\s*(?:of age|old))[^.]{0,60}?experience', re.I)
 ANY_CLEARANCE = re.compile(r'security clearance|TS/SCI|top secret|secret clearance|clearance (?:is )?required|(?:obtain|eligible for)[^.;]{0,30}clearance|polygraph', re.I)
 ACTIVE_CLEARANCE = re.compile(r'(active|current|must (?:hold|have|possess))[^;:]{0,40}?(clearance|TS/SCI|\bTS\b|top secret|secret)', re.I)
@@ -89,10 +91,12 @@ def selftest():
     assert mentions_clearance('must be able to obtain and maintain a security clearance')
     assert not mentions_clearance('Security Clearance Type: None/Not Required Security Clearance Status: Not Required')
     assert not mentions_clearance('Experience with secret management in Vault and AWS')
-    for title in ('Software Engineer, Entry Level', 'Engineer - AI Delivery (high-potential program)', 'Full Stack Developer', 'Junior Web Developer', 'QA Engineer'):
+    for title in ('Software Engineer, Entry Level', 'Engineer - AI Delivery (high-potential program)', 'Full Stack Developer', 'Junior Web Developer', 'QA Engineer', 'Entry-Level Technical Solutions Engineer', 'Systems Analyst - Intermediate', 'Application Analyst I'):
         assert SOFT_TITLE.search(title), title
-    for title in ('Operations Engineer', 'Early Career Field Service Engineer, Power & Water Solutions', 'Tele-Infectious Disease', 'Licensing Engineer (early career)', 'Mechanical Design Engineer'):
+    for title in ('Operations Engineer', 'Early Career Field Service Engineer, Power & Water Solutions', 'Tele-Infectious Disease', 'Licensing Engineer (early career)', 'Mechanical Design Engineer', 'IT Support Specialist - Level 1', 'Payroll, Benefits & Expenses Coordinator'):
         assert not SOFT_TITLE.search(title), title
+    for title in ('AWS Cloud Infrastructure Experienced Associate', 'Cloud Engineer I', 'Junior Azure Developer'):
+        assert SKIP_TITLE.search(title), title
     print('selftest ok')
 
 def main():
@@ -138,7 +142,7 @@ def main():
         # Location, workplace type (remote/on-site/hybrid) and experience level are deliberately NOT filtered here:
         # the boolean query and the search location are the whole filter, the way a person searches by hand.
         # years is reported for the agent to read, never used to drop a row.
-        if not SOFT_TITLE.search(c['title']) or any(s in c['company'].lower() for s in skip): continue
+        if not SOFT_TITLE.search(c['title']) or SKIP_TITLE.search(c['title']) or any(s in c['company'].lower() for s in skip): continue
         try: page = get(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{c['id']}")
         except Exception as e: print('detail error', c['id'], e); continue
         t = text_of(page)
